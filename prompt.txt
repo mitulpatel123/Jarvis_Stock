@@ -1,100 +1,76 @@
-I need to set up the core "Vision" capability and dynamic configuration for my autonomous trading system. Please perform the following two tasks:
+# PROMPT 1: Update Dependencies and Configuration
+I need to add Reddit API support and new scraping tools. Please perform the following:
 
-1. Update `config/settings.py`:
-   - Modify the `Settings` class to dynamically load ALL Groq API keys from the .env file. It should look for any key starting with `GROQ_API_KEY_` (e.g., _1 to _50) and store them in a list `GROQ_API_KEYS`.
-   - Do the same for `FINNHUB_API_KEYS` and `ALPHA_VANTAGE_KEYS`.
-   - Ensure database and redis configs remain as they are.
+1. Update `requirements.txt`:
+   - Add `asyncpraw` (for Reddit).
+   - Add `beautifulsoup4` (for easier HTML parsing with Playwright).
+   - Add `lxml` (parser).
 
-2. Create a new file `agents/visual_base_agent.py`:
-   - Define a class `VisualBaseAgent` that inherits from `BaseAgent`.
-   - Implement a method `capture_and_analyze(self, url, prompt)` that uses `playwright.async_api` to:
-     a) Launch a headless chromium browser.
-     b) Navigate to the `url`.
-     c) Capture a screenshot and convert it to a base64 string.
-     d) Send this screenshot + prompt to the Groq API using the model `llama-3.2-90b-vision-preview` (use `groq_rotator` from `core.llm`).
-     e) Return the JSON parsed response from the AI.
-   - This class will be the parent for all other agents that need to "see" charts or news.
+2. Update `.env.example`:
+   - Add `REDDIT_CLIENT_ID=your_id`
+   - Add `REDDIT_CLIENT_SECRET=your_secret`
+   - Add `REDDIT_USER_AGENT=jarvis_bot_v2`
 
-Create a new agent file `agents/session_agent.py` to handle market hours and liquidity logic.
+3. Update `config/settings.py`:
+   - Load these new Reddit variables into the `Settings` class.
 
-Requirements:
-1. Class `SessionAgent` inheriting from `BaseAgent`.
-2. Use `pytz` to handle timezones (UTC, EST, London, Tokyo, Sydney).
-3. Implement a method `get_liquidity_status(pair)` that returns "HIGH", "MEDIUM", or "LOW" based on the current time and the specific pair (e.g., EURUSD is high during London/NY overlap).
-4. Implement a check for "Red Folder" news events (you can mock this for now or integrate with a calendar API if available, but for now just create the logic structure to return `is_news_event: True/False`).
-5. In the `run()` loop, publish a message to Redis channel `market_status` every 60 seconds with the current session info and liquidity status for all major pairs.
-
-
-Create two new agent files for fundamental analysis:
-
-1. `agents/news_agent.py`:
-   - Inherit from `VisualBaseAgent`.
-   - Implement `run()` to visit "https://www.forexlive.com/" every 60 seconds.
-   - Use `capture_and_analyze` to take a screenshot of the latest headlines.
-   - Send a prompt to Groq Vision to "Extract the top 3 forex headlines and determine if they are Bullish/Bearish for USD, EUR, or GBP."
-   - Publish the sentiment signals to Redis channel `signals:news`.
-
-2. `agents/social_agent.py`:
-   - Inherit from `BaseAgent`.
-   - Use the Reddit API (via `asyncpraw` or standard requests) to check `r/Forex` and `r/Daytrading`.
-   - Fetch the top 10 "Hot" posts.
-   - Analyze the text titles using `groq_rotator` to get a sentiment score (-1 to +1) for major currencies.
-   - Publish to Redis channel `signals:social`.
-
-Create two specialized technical agents:
-
-1. `agents/correlation_agent.py`:
-   - Inherit from `BaseAgent`.
-   - Every 60 seconds, fetch price data for EURUSD, DXY (Dollar Index), and Gold (XAUUSD) using the `AlphaVantageAgent` logic or shared Redis data.
-   - Calculate the correlation coefficient (last 50 periods).
-   - If EURUSD is moving UP but DXY is also moving UP (divergence), publish a "WARNING" signal to Redis.
-
-2. `agents/volatility_agent.py`:
-   - Inherit from `BaseAgent`.
-   - Calculate ATR (Average True Range) for target pairs.
-   - If volatility is extremely low (consolidation), signal "WAIT".
-   - If volatility is extremely high (expansion), signal "BREAKOUT_WATCH".
-   - Publish to Redis channel `signals:volatility`.
-
-Completely rewrite `core/brain.py` to implement the advanced decision logic.
+# PROMPT 2: Fix Social Agent (Real Reddit Data)
+Update `agents/social_agent.py` to remove the mock data and use the real Reddit API.
 
 Requirements:
-1. Initialize ALL 20 agents (Finnhub, Alpha, Vision, News, Social, Session, Correlation, Volatility, Risk, Execution, etc.).
-2. In `decision_loop`, subscribe to `signals:*`.
-3. Implement a `SignalBuffer` class that stores incoming signals for each pair in a 10-second rolling window.
-4. Implement `process_voting(pair)`:
-   - Count how many agents have sent a "BUY" or "SELL" signal in the buffer.
-   - Logic: IF (Total Votes >= 15) AND (Average Confidence > 0.75) AND (Risk Agent says OK) -> Execute Trade.
-   - Logic: IF (Risk Agent says "CLOSE") -> Force Close immediately.
-5. Add `system_health_check()` at startup to verify all API keys and Redis connection before starting the loop.
+1. Import `asyncpraw` and `settings`.
+2. Initialize `asyncpraw.Reddit` using credentials from `settings`.
+3. In the `run()` loop:
+   - Fetch the top 10 "hot" posts from subreddits: `["Forex", "Daytrading", "algotrading"]`.
+   - Combine titles and self-text.
+   - Send the combined text to `groq_rotator` for sentiment analysis (Bullish/Bearish/Neutral).
+   - Publish the real sentiment score to Redis channel `signals:social`.
+4. Handle API errors gracefully (log and sleep).
 
+# PROMPT 3: Fix Correlation Agent (Real Price Data)
+Update `agents/correlation_agent.py` to calculate real correlations instead of hardcoded strings.
 
+Requirements:
+1. Subscribe to Redis channels `ticks:EUR/USD` and `ticks:USD/JPY` (as a proxy for DXY inverse, since DXY isn't always available on free feeds).
+2. Store the last 60 minutes of price ticks for both pairs in local lists/deques.
+3. Every 60 seconds:
+   - Calculate the percentage change for both pairs over the last hour.
+   - Logic: If EUR/USD is UP and USD/JPY is DOWN, that is "Normal" (USD weakness).
+   - Logic: If EUR/USD is UP and USD/JPY is UP, that is "Divergence" (Warning).
+4. Publish the calculated status to `signals:correlation`.
 
-Update `agents/execution_agent.py` to be robust against browser freezes.
+# PROMPT 4: Implement MyFxBook Agent (Order Book)
+Create a new file `agents/orderbook_agent.py`.
 
-1. Modify `run()` to include a "Heartbeat" check:
-   - Every 5 seconds, read the text of a timestamp or a ticking price element on the Exness terminal.
-   - If the text hasn't changed in 10 seconds, call `self.page.reload()`.
-2. Add a `verify_trade_visual(order_type)` method:
-   - Before clicking "Confirm", take a screenshot.
-   - Send to Groq Vision: "Does this screen show a confirmed [BUY/SELL] order setup? Reply YES/NO."
-   - Only click confirm if AI says YES.
+Requirements:
+1. Inherit from `BaseAgent` (or `VisualBaseAgent` if you prefer screenshotting, but text scraping is faster here).
+2. Use `playwright` to visit: "https://www.myfxbook.com/forex-market/orderbook".
+3. Wait for the table `#orderBookContainer` to load.
+4. Extract the "Long %" and "Short %" for `EURUSD`, `GBPUSD`, `USDJPY`.
+   - Selector hint: look for `tr` elements containing the symbol name.
+5. Logic: If "Short %" > 70%, sentiment is "Bullish" (Contrarian Indicator).
+6. Publish to Redis channel `signals:orderbook`.
 
+# PROMPT 5: Implement CFTC COT Agent (Institutional Data)
+Create a new file `agents/cftc_agent.py`.
 
-Create the final utility scripts:
+Requirements:
+1. Inherit from `BaseAgent`.
+2. Run frequency: Once every 24 hours (check if it's Friday).
+3. URL: "https://www.cftc.gov/dea/futures/deacmesf.htm" (Chicago Mercantile Exchange Short Format).
+4. Use `aiohttp` to fetch the raw text data.
+5. Parse the text to find "EURO FX" and "JAPANESE YEN".
+6. Extract "Non-Commercial" (Speculator) positions: Long vs Short.
+7. Publish the net positioning to Redis channel `signals:cftc`.
 
-1. `tools/health_check.py`:
-   - A standalone script that prints the status of:
-     - Redis Connection.
-     - Database Connection.
-     - Number of loaded Groq Keys.
-     - Finnhub/AlphaVantage connectivity.
+# PROMPT 6: Harden Execution Agent (Safety Checks)
+Update `agents/execution_agent.py` to implement strict safety.
 
-2. `run.py` (The main entry point):
-   - Use `colorama` for a CLI interface.
-   - Ask user: "Mode: [1] Paper Trade  [2] Live Trade".
-   - If Live, ask for Exness Email/Password (secure input).
-   - Run `tools/health_check.py`.
-   - If healthy, launch `core/brain.py`.
-
-
+Requirements:
+1. Update `verify_trade_visual`:
+   - It MUST return `False` if the Vision AI response is negative or unclear.
+   - It MUST return `False` if the screenshot fails.
+   - Currently, it defaults to `True` ("Fail open") - change this to "Fail safe" (default `False`).
+2. Add a `validate_spread` check before `place_order`:
+   - Read the current spread from the screen or Redis.
+   - If spread > 2.0 pips (for majors), return `False` and log "Spread too high".

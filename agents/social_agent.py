@@ -1,46 +1,72 @@
 import asyncio
 import logging
 import json
-import aiohttp
+import asyncpraw
 from agents.base_agent import BaseAgent
 from core.llm import groq_rotator
 from core.redis_client import redis_client
+from config.settings import settings
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 class SocialAgent(BaseAgent):
-    """Agent to analyze Reddit sentiment."""
+    """Agent to analyze Reddit sentiment using real API."""
     
     def __init__(self):
         super().__init__(name="social_agent", loop_interval=300) # 5 mins
-        self.subreddits = ["Forex", "Daytrading"]
+        self.subreddits = ["Forex", "Daytrading", "algotrading"]
+        self.reddit = None
+
+    async def start(self):
+        """Initialize Reddit API connection."""
+        await super().start()
+        if settings.REDDIT_CLIENT_ID and settings.REDDIT_CLIENT_SECRET:
+            self.reddit = asyncpraw.Reddit(
+                client_id=settings.REDDIT_CLIENT_ID,
+                client_secret=settings.REDDIT_CLIENT_SECRET,
+                user_agent=settings.REDDIT_USER_AGENT
+            )
+            logger.info("🤖 Reddit API Initialized")
+        else:
+            logger.warning("⚠️ Reddit Credentials Missing! Agent will run in mock mode or fail.")
+
+    async def stop(self):
+        """Close Reddit connection."""
+        await super().stop()
+        if self.reddit:
+            await self.reddit.close()
 
     async def run(self):
         """Fetch and analyze Reddit posts."""
-        all_posts = []
-        
-        # Mocking Reddit API for now as we don't have credentials in prompt
-        # In production, use asyncpraw
-        logger.info("🤖 Fetching Reddit posts (Mock)...")
-        
-        # Simulated posts
-        mock_posts = [
-            "USD is looking strong today after CPI",
-            "EURUSD dropping like a stone, shorting now",
-            "Gold breaking out, buy XAUUSD",
-            "GBPUSD rejection at resistance, time to sell"
-        ]
-        
-        prompt = f"""
-        Analyze the sentiment of these Reddit post titles regarding Forex pairs:
-        {mock_posts}
-        
-        Return a JSON with sentiment score (-1 to +1) for: USD, EUR, GBP, XAU.
-        Format: {{ "USD": 0.5, "EUR": -0.2, ... }}
-        """
-        
+        if not self.reddit:
+            logger.error("❌ Reddit API not initialized. Skipping run.")
+            return
+
+        all_text = []
         try:
+            logger.info("🤖 Fetching Reddit posts...")
+            for sub_name in self.subreddits:
+                subreddit = await self.reddit.subreddit(sub_name)
+                async for post in subreddit.hot(limit=10):
+                    all_text.append(f"Title: {post.title}\nText: {post.selftext[:200]}")
+            
+            if not all_text:
+                logger.warning("⚠️ No posts found.")
+                return
+
+            # Combine for analysis (limit length to avoid token limits)
+            combined_text = "\n---\n".join(all_text[:15]) 
+            
+            prompt = f"""
+            Analyze the sentiment of these Reddit posts regarding Forex pairs (EUR, USD, GBP, JPY, XAU).
+            Posts:
+            {combined_text}
+            
+            Return a JSON with sentiment score (-1.0 to +1.0) for each currency.
+            Format: {{ "USD": 0.5, "EUR": -0.2, ... }}
+            """
+            
             response = await groq_rotator.chat_completion(prompt)
             sentiment_data = json.loads(response)
             
@@ -53,3 +79,4 @@ class SocialAgent(BaseAgent):
             
         except Exception as e:
             logger.error(f"❌ Social Analysis Error: {e}")
+            await asyncio.sleep(60) # Backoff on error

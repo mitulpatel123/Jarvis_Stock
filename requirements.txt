@@ -6,3 +6,7 @@ pandas
 asyncpg
 redis
 colorama
+asyncpraw
+beautifulsoup4
+lxml
+aiohttp

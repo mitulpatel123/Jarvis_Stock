@@ -38,4 +38,9 @@ class Settings:
     EXNESS_EMAIL = os.getenv("EXNESS_EMAIL")
     EXNESS_PASSWORD = os.getenv("EXNESS_PASSWORD")
 
+    # Reddit
+    REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
+    REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
+    REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "jarvis_bot_v2")
+
 settings = Settings()
