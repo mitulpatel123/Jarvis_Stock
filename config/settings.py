@@ -7,19 +7,19 @@ load_dotenv()
 class Settings:
     # Groq
     GROQ_API_KEYS = [
-        os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 11) 
+        os.getenv(f"GROQ_API_KEY_{i}") for i in range(1, 51) 
         if os.getenv(f"GROQ_API_KEY_{i}")
     ]
     
     # Finnhub
     FINNHUB_API_KEYS = [
-        os.getenv(f"FINNHUB_API_KEY_{i}") for i in range(1, 11) 
+        os.getenv(f"FINNHUB_API_KEY_{i}") for i in range(1, 51) 
         if os.getenv(f"FINNHUB_API_KEY_{i}")
     ]
     
     # Alpha Vantage
     ALPHA_VANTAGE_KEYS = [
-        os.getenv(f"ALPHA_VANTAGE_KEY_{i}") for i in range(1, 11) 
+        os.getenv(f"ALPHA_VANTAGE_KEY_{i}") for i in range(1, 51) 
         if os.getenv(f"ALPHA_VANTAGE_KEY_{i}")
     ]
     

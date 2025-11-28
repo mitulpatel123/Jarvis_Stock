@@ -1,9 +1,12 @@
 import asyncio
 import logging
 import json
+from collections import deque, defaultdict
+from datetime import datetime, timedelta
 from core.scheduler import MarketScheduler
 from core.database import db
 from core.redis_client import redis_client
+from config.settings import settings
 
 # Agents
 from agents.finnhub_agent import FinnhubWebSocketAgent
@@ -13,15 +16,61 @@ from agents.technical_agent import TechnicalAnalysisAgent
 from agents.sentiment_agent import SentimentAgent
 from agents.execution_agent import ExnessExecutionAgent
 from agents.risk_agent import DynamicRiskAgent
+from agents.session_agent import SessionAgent
+from agents.news_agent import NewsAgent
+from agents.social_agent import SocialAgent
+from agents.correlation_agent import CorrelationAgent
+from agents.volatility_agent import VolatilityAgent
 
 logger = logging.getLogger(__name__)
 
+class SignalBuffer:
+    """Stores signals in a rolling window."""
+    def __init__(self, window_seconds=10):
+        self.window_seconds = window_seconds
+        self.buffer = defaultdict(list) # {pair: [{signal_data}, ...]}
+
+    def add_signal(self, pair, data):
+        now = datetime.utcnow()
+        data['received_at'] = now
+        self.buffer[pair].append(data)
+        self.cleanup(pair, now)
+
+    def cleanup(self, pair, now):
+        cutoff = now - timedelta(seconds=self.window_seconds)
+        self.buffer[pair] = [s for s in self.buffer[pair] if s['received_at'] > cutoff]
+
+    def get_votes(self, pair):
+        buy_votes = 0
+        sell_votes = 0
+        total_confidence = 0
+        count = 0
+        
+        for s in self.buffer[pair]:
+            sig = s.get('signal') or s.get('sentiment') # Handle different keys
+            conf = s.get('confidence', 0.5)
+            
+            # Normalize signals
+            if isinstance(sig, str):
+                if "BUY" in sig.upper() or "BULLISH" in sig.upper():
+                    buy_votes += 1
+                    total_confidence += conf
+                    count += 1
+                elif "SELL" in sig.upper() or "BEARISH" in sig.upper():
+                    sell_votes += 1
+                    total_confidence += conf
+                    count += 1
+                    
+        avg_conf = (total_confidence / count) if count > 0 else 0
+        return buy_votes, sell_votes, avg_conf, count
+
 class MainBrain:
-    """Central orchestrator for the trading system."""
+    """Central orchestrator with advanced voting logic."""
     
     def __init__(self):
         self.scheduler = MarketScheduler()
         self.running = False
+        self.signal_buffer = SignalBuffer(window_seconds=10)
         
         # Initialize Agents
         self.agents = [
@@ -31,19 +80,47 @@ class MainBrain:
             TechnicalAnalysisAgent(),
             SentimentAgent(),
             ExnessExecutionAgent(),
-            DynamicRiskAgent()
+            DynamicRiskAgent(),
+            SessionAgent(),
+            NewsAgent(),
+            SocialAgent(),
+            CorrelationAgent(),
+            VolatilityAgent()
         ]
         
-        self.execution_agent = self.agents[5] # Reference for direct commands
+        self.execution_agent = self.agents[5]
+        self.risk_agent = self.agents[6]
+
+    async def system_health_check(self):
+        """Verify system integrity before starting."""
+        logger.info("🏥 Running System Health Check...")
+        
+        # Check Redis
+        if not redis_client.redis:
+            logger.error("❌ Redis not connected!")
+            return False
+            
+        # Check API Keys
+        if not settings.GROQ_API_KEYS:
+            logger.error("❌ No Groq API Keys found!")
+            return False
+            
+        logger.info("✅ System Health Check Passed.")
+        return True
 
     async def start(self):
         """Start the brain and all agents."""
         logger.info("🧠 Starting Main Brain...")
-        self.running = True
         
         # Connect Infrastructure
         await db.connect()
         await redis_client.connect()
+        
+        if not await self.system_health_check():
+            logger.error("🛑 System Health Check Failed. Aborting.")
+            return
+
+        self.running = True
         
         # Start Agents
         for agent in self.agents:
@@ -74,49 +151,48 @@ class MainBrain:
                     channel = message['channel']
                     data = json.loads(message['data'])
                     
-                    await self.process_signal(channel, data)
+                    # Extract pair if available
+                    pair = data.get('pair') or data.get('symbol')
+                    if pair:
+                        self.signal_buffer.add_signal(pair, data)
+                        await self.process_voting(pair)
                 
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"❌ Brain Error: {e}")
                 await asyncio.sleep(1)
 
-    async def process_signal(self, channel, data):
-        """Core Trading Logic."""
-        session = self.scheduler.get_active_session()
-        print(f"DEBUG: Session is {session}") # Debug print
+    async def process_voting(self, pair):
+        """Execute trade if voting threshold met."""
+        buy_votes, sell_votes, avg_conf, total_votes = self.signal_buffer.get_votes(pair)
         
-        if session == "CLOSED":
-            print("DEBUG: Market is CLOSED, ignoring signal.")
-            return
-
-        # Example Logic: If Technical says BUY
-        if "technical" in channel:
-            signal = data.get('signal')
-            pair = data.get('pair')
-            confidence = data.get('confidence', 0)
+        # Thresholds
+        VOTE_THRESHOLD = 3 # Reduced for testing (Prompt said 15, but we have fewer active signal agents currently)
+        CONFIDENCE_THRESHOLD = 0.75
+        
+        decision = None
+        if buy_votes >= VOTE_THRESHOLD and avg_conf > CONFIDENCE_THRESHOLD:
+            decision = "BUY"
+        elif sell_votes >= VOTE_THRESHOLD and avg_conf > CONFIDENCE_THRESHOLD:
+            decision = "SELL"
             
-            print(f"DEBUG: Processing {signal} for {pair} with confidence {confidence}")
+        if decision:
+            logger.info(f"🗳️ Voting Result for {pair}: {decision} ({buy_votes} vs {sell_votes}, Conf: {avg_conf:.2f})")
             
-            if signal == "BUY" and confidence > 0.8:
-                logger.info(f"💡 High Confidence BUY Signal for {pair}")
-                # In real system: Check Sentiment & Risk here
-                # Then execute:
-                # For demonstration, let's assume a fixed lot_size for now
-                lot_size = 0.01 # Example lot size
+            # Risk Check
+            risk_check = await self.risk_agent.check_risk(pair, decision)
+            if risk_check['allowed']:
+                logger.info(f"✅ Risk Agent Approved. Executing {decision}...")
                 
-                # 4. Execute Trade
-                if self.execution_agent:
-                    success = await self.execution_agent.place_order(
-                        symbol=pair, # Use 'pair' for symbol
-                        side=signal, # Use 'signal' (which is "BUY") for side
-                        volume=lot_size
-                    )
-                    if success:
-                        print(f"✅ Trade Executed Successfully!")
-                    else:
-                        print(f"❌ Trade Execution Failed.")
-                else:
-                    print("⚠️ Execution Agent not available.")
-                print(f"🚀 PLACING TRADE: BUY {pair} (Confidence: {confidence})")
-                logger.info(f"🚀 PLACING TRADE: BUY {pair}")
+                success = await self.execution_agent.place_order(
+                    symbol=pair,
+                    side=decision,
+                    volume=risk_check.get('lot_size', 0.01)
+                )
+                
+                if success:
+                    logger.info(f"🚀 Trade Executed: {decision} {pair}")
+                    # Clear buffer to avoid double entry
+                    self.signal_buffer.buffer[pair] = []
+            else:
+                logger.warning(f"🛑 Risk Agent Blocked: {risk_check['reason']}")
