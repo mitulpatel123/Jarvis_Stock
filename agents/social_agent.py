@@ -20,6 +20,10 @@ class SocialAgent(BaseAgent):
 
     async def start(self):
         """Initialize Reddit API connection."""
+        if not settings.REDDIT_CLIENT_ID or "placeholder" in settings.REDDIT_CLIENT_ID:
+            logger.warning("⚠️ Social Agent Disabled: Missing Reddit API Keys.")
+            return # Do not start
+            
         await super().start()
         if settings.REDDIT_CLIENT_ID and settings.REDDIT_CLIENT_SECRET:
             self.reddit = asyncpraw.Reddit(

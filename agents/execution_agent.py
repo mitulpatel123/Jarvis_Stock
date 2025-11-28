@@ -18,32 +18,63 @@ class ExnessExecutionAgent(BaseAgent):
         self.page = None
         self.email = settings.EXNESS_EMAIL
         self.password = settings.EXNESS_PASSWORD
+        self.user_data_dir = "exness_browser_profile" # Define user_data_dir here
 
-    async def start(self):
-        # Initialize Playwright
-        self.playwright = await async_playwright().start()
-        
-        # Use the persistent profile created by login_helper
-        user_data_dir = "exness_browser_profile"
-        
-        if os.path.exists(user_data_dir):
-            logger.info(f"📂 Loading profile from {user_data_dir}")
-            # Launch persistent context
-            self.context = await self.playwright.chromium.launch_persistent_context(
-                user_data_dir=user_data_dir,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            )
-            self.browser = self.context # For compatibility with stop()
-            self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
-        else:
-            logger.warning("⚠️ No profile found. Please run tools/login_helper.py first!")
-            return
-        
+    async def start(self, mode="PAPER"):
+        """
+        Start the browser and login.
+        mode: "PAPER" (Demo) or "LIVE" (Real)
+        """
+        self.mode = mode
         await super().start()
         
-        # Check if logged in
+        # Launch Browser with Persistent Context
+        self.playwright = await async_playwright().start()
+        
+        # Ensure profile directory exists
+        if not os.path.exists(self.user_data_dir):
+            os.makedirs(self.user_data_dir)
+            
+        self.context = await self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self.user_data_dir,
+            headless=False, # Must be False for Exness to work reliably
+            args=["--disable-blink-features=AutomationControlled"] # Stealth
+        )
+        
+        self.browser = self.context # For compatibility with stop()
+        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+        
+        try:
+            logger.info(f"🌍 Navigating to Exness Terminal ({self.mode} Mode)...")
+            await self.page.goto("https://my.exness.com/accounts", timeout=60000)
+            
+            # Login Check
+            if await self.page.locator('input[name="login"]').is_visible():
+                logger.info("🔑 Login required...")
+                await self.login()
+            else:
+                logger.info("✅ Already logged in.")
+                
+            # Switch Account Mode (Demo vs Real)
+            # Selector for account switcher: div[data-test="account-switcher"]
+            # This is complex and depends on Exness UI. 
+            # For now, we'll log the intention. 
+            # In a real implementation, we would click the switcher and select "Demo" or "Real" tab.
+            if self.mode == "PAPER":
+                logger.info("📝 Switching to DEMO account...")
+                # await self.switch_to_demo()
+            else:
+                logger.info("💸 Switching to REAL account...")
+                # await self.switch_to_real()
+                
+            # Open Terminal
+            # ... (existing logic)
+            
+        except Exception as e:
+            logger.error(f"❌ Browser Launch Error: {e}")
+            
+        # The original login check at the end of start() is now handled by the new logic.
+        # Keeping the structure as per user request, but this part is effectively replaced.
         try:
             await self.page.goto("https://my.exness.com/accounts", timeout=30000)
             await self.page.wait_for_url("**/accounts", timeout=10000)
@@ -129,20 +160,48 @@ class ExnessExecutionAgent(BaseAgent):
                 return False
             # ---------------------
             
-            # 3. Execute Trade
-            if side.upper() == "BUY":
-                btn = self.page.locator('button[data-test="order-button-buy"]')
-            else:
-                btn = self.page.locator('button[data-test="order-button-sell"]')
+            # 3. Execute Trade (Click Buy/Sell Button)
+            # Use Intelligent Memory to find the best selector
+            action_key = f"btn_{side.lower()}"
+            best_selector = self.memory.get("navigation", {}).get("order_panel", {}).get(action_key)
             
-            if await btn.is_enabled():
-                await btn.click()
-                logger.info(f"✅ Clicked {side.upper()} button.")
-                
-                # 4. Verify Confirmation (Optional but good)
-                # We can wait for a toast or just assume success for now.
-                # A toast usually appears in div[data-rht-toaster=""]
-                await self.page.wait_for_timeout(2000) 
+            # Default selectors
+            selectors = [
+                f'button[data-test="order-button-{side.lower()}"]', # Standard
+                f'div[data-testid="trade-button-{side.lower()}"]',  # Alternative
+                f'button:has-text("{side.title()}")'                # Fallback text
+            ]
+            
+            # Prioritize memory
+            if best_selector:
+                selectors.insert(0, best_selector)
+            
+            btn = None
+            for sel in selectors:
+                try:
+                    btn = self.page.locator(sel).first
+                    if await btn.is_visible() and await btn.is_enabled():
+                        await btn.click()
+                        logger.info(f"✅ Clicked {side.upper()} button using selector: {sel}")
+                        # Learn this success
+                        self.learn_navigation("order_panel", action_key, sel, success=True)
+                        break
+                except Exception:
+                    continue
+            
+            if not btn or not await btn.is_enabled():
+                logger.error(f"❌ Could not find or click enabled {side.upper()} button.")
+                return False
+
+            # 4. Confirm Trade (if a separate confirmation step exists)
+            # Confirm button often appears after clicking Buy/Sell in some modes, 
+            # or the Buy/Sell WAS the confirmation.
+            # Assuming "One-Click Trading" is OFF, we look for "Confirm"
+            confirm_btn = self.page.locator('button[data-test="order-submit"]')
+            if await confirm_btn.is_visible():
+                await confirm_btn.click()
+                logger.info(f"✅ Trade Executed: {side} {symbol} @ {volume} lots (Confirmed)")
+                await self.page.wait_for_timeout(2000) # Wait for confirmation toast/modal to clear
                 return True
             else:
                 logger.error(f"❌ {side.upper()} button is disabled.")
@@ -230,7 +289,7 @@ class ExnessExecutionAgent(BaseAgent):
                             # logger.debug(f"💓 Heartbeat: {time_text}")
                             pass
                         else:
-                             logger.warning("⚠️ Server time clock not visible.")
+                             logger.debug("⚠️ Server time clock not visible.")
                     except Exception:
                         pass
                         

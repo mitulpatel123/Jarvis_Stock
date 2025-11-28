@@ -9,4 +9,7 @@ colorama
 asyncpraw
 beautifulsoup4
 lxml
+fastapi
+uvicorn
+websockets
 aiohttp

@@ -43,8 +43,10 @@ class VisualBaseAgent(BaseAgent):
             page = await browser.new_page()
             
             logger.info(f"📸 Navigating to {url}...")
-            await page.goto(url, timeout=60000)
-            await page.wait_for_load_state("networkidle", timeout=60000)
+            try:
+                await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            except Exception as e:
+                logger.warning(f"⚠️ Navigation timeout (continuing anyway): {e}")
             
             # Take screenshot
             screenshot_bytes = await page.screenshot(full_page=False)
@@ -74,7 +76,7 @@ class VisualBaseAgent(BaseAgent):
             client = groq_rotator.get_client()
             
             completion = client.chat.completions.create(
-                model="llama-3.2-90b-vision-preview",
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
                 messages=messages,
                 temperature=0.1,
                 max_tokens=1024,

@@ -4,8 +4,32 @@ import os
 import logging
 from colorama import init, Fore, Style
 
+import redis
+
 # Initialize colorama
 init(autoreset=True)
+
+class RedisLogHandler(logging.Handler):
+    """Publishes logs to Redis for the Dashboard."""
+    def __init__(self):
+        super().__init__()
+        try:
+            self.redis = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+        except Exception:
+            self.redis = None
+    
+    def emit(self, record):
+        if not self.redis: return
+        try:
+            msg = self.format(record)
+            self.redis.publish("logs", msg)
+        except Exception:
+            pass
+
+# Configure Logging to Redis
+redis_handler = RedisLogHandler()
+redis_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logging.getLogger().addHandler(redis_handler)
 
 async def main():
     print(Fore.CYAN + Style.BRIGHT + """
@@ -53,7 +77,7 @@ async def main():
     
     brain = MainBrain()
     try:
-        await brain.start()
+        await brain.start(mode=mode)
         
         # Keep alive
         while True:

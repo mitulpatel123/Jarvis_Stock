@@ -43,4 +43,7 @@ class Settings:
     REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
     REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "jarvis_bot_v2")
 
+    # FCS API
+    FCS_API_KEY = os.getenv("FCS_API_KEY")
+
 settings = Settings()
